@@ -1,12 +1,18 @@
+use std::collections::HashMap;
 use std::env;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process;
 
 use crate::*;
 
+const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+
 #[derive(Debug)]
 pub struct Config {
     pub verbose: bool, // -v
-    pub bind_addr: Vec<String>,
+    pub bind_addr: SocketAddr,
+    pub files: HashMap<String, PathBuf>,
 }
 
 lazy_static! {
@@ -24,13 +30,18 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             verbose: false,
-            bind_addr: vec![],
+            bind_addr: DEFAULT_BIND_ADDR.parse().unwrap(),
+            files: HashMap::new(),
         }
     }
 }
 impl Config {
     pub fn usage() {
-        eprintln!("Usage: mchttp [-v] bind_addrs");
+        eprintln!("Usage: mchttp [-v] [-l bind_addrs] files");
+        eprintln!(
+            "       -l            address to bind and listen on ({})",
+            &DEFAULT_BIND_ADDR
+        );
         eprintln!("       -v            verbose");
         process::exit(1);
     }
@@ -41,7 +52,7 @@ impl Config {
         let mut args = env::args();
         args.next(); // blow off the first argument
         while let Some(a) = args.next() {
-            config.bind_addr.push(match a.as_str() {
+            match a.as_str() {
                 "-v" => {
                     config.verbose = true;
                     continue;
@@ -54,14 +65,29 @@ impl Config {
                     Self::usage();
                     break;
                 }
-                _ => a,
-            })
+
+                // Derive the canonical form of the path being specified
+                // If it relative to our current directory, load it into the
+                // hash with a p
+                _ => match std::fs::canonicalize(&a) {
+                    Ok(p) => {
+                        if a.starts_with("/") {
+                            config.files.insert(a, p);
+                        } else {
+                            config.files.insert(format!("/{}", a), p);
+                        }
+                    }
+                    _ => {
+                        eprintln!("Ignoring {}", &a);
+                    }
+                },
+            };
         }
 
         // Add a make-shift default here
-        if config.bind_addr.len() == 0 {
-            config.bind_addr.push(String::from("0.0.0.0:8002"));
-        }
+        // if config.files.len() == 0 {
+        //     config.files.push(PathBuf::from("/tmp/test.txt"));
+        // }
         config
     }
 }

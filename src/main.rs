@@ -16,6 +16,9 @@ use crate::config::*;
 mod http;
 use crate::http::*;
 
+mod mimetype;
+use crate::mimetype::*;
+
 pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 pub const COMMIT_ID: &str = env!("GIT_COMMITID");
@@ -24,16 +27,11 @@ pub const COMMIT_ID: &str = env!("GIT_COMMITID");
 #[tokio::main]
 pub async fn main() -> Result<()> {
     dbg!(&PKG_NAME, &PKG_VERSION, &COMMIT_ID);
+    dbg!(&*CONFIG);
 
     let mut tasks = JoinSet::<Result<()>>::new();
 
-    if CONFIG.verbose {
-        dbg!(&*CONFIG);
-    }
-
-    for bind_addr in &CONFIG.bind_addr {
-        tasks.spawn(async move { http_listener(&bind_addr).await });
-    }
+    tasks.spawn(async move { http_listener(&CONFIG.bind_addr).await });
 
     while let Some(join_result) = tasks.join_next().await {
         match join_result {
@@ -43,7 +41,7 @@ pub async fn main() -> Result<()> {
                     eprintln!("Async task cancellation");
                 } else if join_error.is_panic() {
                     eprintln!("Async task panicked!");
-                    panic::resume_unwind(join_error.into_panic())
+                    //                    panic::resume_unwind(join_error.into_panic())
                 }
             }
         }

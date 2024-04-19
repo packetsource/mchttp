@@ -2,7 +2,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
+use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::net::ToSocketAddrs;
@@ -29,12 +31,15 @@ pub struct HttpRequest {
 // Main HTTP listener. Binds to port and spawns a new task calling process()
 // for each incoming request
 pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
+    // pub async fn http_listener<A: ToSocketAddrs>(addr: &A) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     loop {
         let (socket, addr) = listener.accept().await?;
 
-        eprintln!("HTTP: {:?} connected on FD {}", &addr, &socket.as_raw_fd());
+        if CONFIG.verbose {
+            eprintln!("HTTP: {:?} connected on FD {}", &addr, &socket.as_raw_fd());
+        }
         spawn(async move {
             match process(socket).await {
                 Ok(()) => {}
@@ -42,49 +47,15 @@ pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
                     eprintln!("Error encountered while handling request: {e}");
                 }
             }
-            // process(socket).await?;
-            eprintln!("HTTP: {:?} closed", &addr);
+            if CONFIG.verbose {
+                eprintln!("HTTP: {:?} closed", &addr);
+            }
             anyhow::Ok(())
         });
     }
 
     #[allow(unreachable_code)]
     Ok(())
-}
-
-// Utility function to break out query string into constituent KV pairs
-pub fn query_string(url: &str) -> (String, HashMap<String, String>) {
-    let mut query = HashMap::<String, String>::new();
-    let mut bare_url = url.to_string();
-
-    match urlencoding::decode(url) {
-        Ok(url) => {
-            match url.split_once("?") {
-                Some((url, query_string)) => {
-                    bare_url = url.to_string(); // re-assign
-
-                    // Split on & to get the individual key-value pairs
-                    for kv in query_string.split("&") {
-                        // Split on = to separate key and value.
-                        // Lowercase the key, and store
-                        match kv
-                            .split_once("=")
-                            .map(|x| (x.0.to_lowercase(), x.1.to_string()))
-                        {
-                            Some((k, v)) => {
-                                query.insert(k, v);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        _ => {}
-    }
-
-    (bare_url, query)
 }
 
 // Entry point per HTTP client connection.
@@ -124,7 +95,9 @@ pub async fn process(stream: TcpStream) -> Result<()> {
 
             // First line is the main verb, URL request and version
             if line_count == 0 {
-                eprintln!("HTTP: request: {}", &line);
+                if CONFIG.verbose {
+                    eprintln!("HTTP: request: {}", &line);
+                }
                 let verb_tokens: Vec<&str> = line.split(" ").collect();
                 if verb_tokens.len() != 3 {
                     return Err(Error::msg(
@@ -169,6 +142,79 @@ pub async fn process(stream: TcpStream) -> Result<()> {
     request_handler(http_request).await
 }
 
+// Utility function to break out query string into constituent KV pairs
+pub fn query_string(url: &str) -> (String, HashMap<String, String>) {
+    let mut query = HashMap::<String, String>::new();
+    let mut bare_url = url.to_string();
+
+    match urlencoding::decode(url) {
+        Ok(url) => {
+            match url.split_once("?") {
+                Some((url, query_string)) => {
+                    bare_url = url.to_string(); // re-assign
+
+                    // Split on & to get the individual key-value pairs
+                    for kv in query_string.split("&") {
+                        // Split on = to separate key and value.
+                        // Lowercase the key, and store
+                        match kv
+                            .split_once("=")
+                            .map(|x| (x.0.to_lowercase(), x.1.to_string()))
+                        {
+                            Some((k, v)) => {
+                                query.insert(k, v);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
+    (bare_url, query)
+}
+
+pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
+    let start_time = Instant::now();
+
+    match CONFIG.files.get(&request.url) {
+        Some(path) => {
+            let meta = fs::metadata(&path).await?;
+            let content_length = meta.len();
+
+            // Crude mimetypes mappings
+            let content_type = lookup_mimetype(&request);
+
+            let file = tokio::fs::OpenOptions::new().read(true).open(&path).await?;
+            send_response_header(&mut request, content_type, content_length).await?;
+            tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
+            println!(
+                "{} {} ({}) type {}, {} byte(s) in {:?}",
+                request.stream.peer_addr()?,
+                &request.url,
+                path.to_string_lossy(),
+                content_type,
+                content_length,
+                start_time.elapsed()
+            );
+        }
+        None => {
+            println!(
+                "{} {} not found (404) in {:?}",
+                request.stream.peer_addr()?,
+                &request.url,
+                start_time.elapsed()
+            );
+            send_response(&mut request, "text/plain", None).await?;
+        }
+    }
+
+    anyhow::Ok(())
+}
+
 pub async fn send_response(
     request: &mut HttpRequest,
     content_type: &str,
@@ -194,31 +240,19 @@ pub async fn send_response(
     }
 }
 
-pub async fn send_response_header(request: &mut HttpRequest, content_type: &str) -> Result<()> {
+pub async fn send_response_header(
+    request: &mut HttpRequest,
+    content_type: &str,
+    content_length: u64,
+) -> Result<()> {
     Ok(request
         .stream
-        .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n", content_type).as_bytes())
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+                content_type, content_length
+            )
+            .as_bytes(),
+        )
         .await?)
-}
-
-pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
-    let response: Option<String> = {
-        if request.url == ("/resources.zip") {
-            let mut file = tokio::fs::OpenOptions::new()
-                .read(true)
-                .open("resources.zip")
-                .await?;
-
-            send_response_header(&mut request, "application/x-zip").await?;
-
-            tokio::io::copy(&mut file, &mut request.stream).await?;
-
-            // explicit return if we streamed
-            return anyhow::Ok(());
-        } else {
-            None
-        }
-    };
-
-    send_response(&mut request, "text/plain", response.as_deref()).await
 }
