@@ -3,6 +3,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
+use std::str::FromStr;
 
 use crate::*;
 
@@ -55,6 +56,15 @@ impl Config {
             match a.as_str() {
                 "-v" => {
                     config.verbose = true;
+                    continue;
+                }
+                "-l" => {
+                    config.bind_addr = SocketAddr::from_str(
+                        args.next()
+                            .expect("expected bind address specification")
+                            .as_str(),
+                    )
+                    .expect("failued to parse bind address specification");
                     continue;
                 }
                 "-h" => {
