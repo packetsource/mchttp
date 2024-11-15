@@ -1,14 +1,33 @@
 #![allow(unused_imports)]
 
+use std::collections::HashMap;
+use std::env;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::process;
+use std::str::FromStr;
+use std::borrow::Cow;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+use std::panic;
+
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;
-use std::net::SocketAddr;
-use std::panic;
 use tokio;
-use tokio::net::TcpListener;
-use tokio::task::JoinSet;
-use tokio::task::{self, JoinError};
+use tokio::fs;
+use tokio::net::ToSocketAddrs;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, BufStream};
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::task::{spawn, JoinSet, JoinHandle};
 use tokio::time::{sleep, Duration};
+
+use regex::Regex;
+
+use native_tls::{Identity};
+use tokio_native_tls::{TlsAcceptor, TlsStream};
 
 mod config;
 use crate::config::*;
@@ -23,6 +42,9 @@ pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 pub const COMMIT_ID: &str = env!("GIT_COMMITID");
 
+#[derive(Clone)]
+pub struct TlsIdentity(Option<Identity>);
+
 //#[tokio::main(flavor="current_thread")]
 #[tokio::main]
 pub async fn main() -> Result<()> {
@@ -31,17 +53,24 @@ pub async fn main() -> Result<()> {
 
     let mut tasks = JoinSet::<Result<()>>::new();
 
-    tasks.spawn(async move { http_listener(&CONFIG.bind_addr).await });
+    tasks.spawn(async move { listener(&CONFIG.bind_addr).await });
 
     while let Some(join_result) = tasks.join_next().await {
         match join_result {
-            Ok(_) => continue,
+            Ok(result) => {
+                eprintln!("Task completed: {:?}", result);
+                continue;
+            },
             Err(join_error) => {
                 if join_error.is_cancelled() {
-                    eprintln!("Async task cancellation");
+                    eprintln!("Task cancellation");
                 } else if join_error.is_panic() {
-                    eprintln!("Async task panicked!");
-                    //                    panic::resume_unwind(join_error.into_panic())
+                    eprintln!("Task panicked!");
+                    if CONFIG.verbose {
+                       panic::resume_unwind(join_error.into_panic())
+                    }
+                } else {
+                    eprintln!("Task join error: {:?}", join_error);
                 }
             }
         }

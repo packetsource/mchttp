@@ -1,57 +1,77 @@
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::net::ToSocketAddrs;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::task::{spawn, JoinHandle};
-
-use anyhow::{Error, Result};
-use lazy_static::lazy_static;
-use regex::Regex;
-
+use native_tls::{Protocol, TlsAcceptorBuilder};
+use tokio::io::AsyncRead;
 use crate::*;
 
 #[derive(Debug)]
-pub struct HttpRequest {
+pub struct HttpRequest<S> {
+    pub client: SocketAddr,
     pub method: String,
     pub url: String,
     pub version: String,
-    pub stream: TcpStream,
+    pub stream: BufStream<S>,
     pub headers: HashMap<String, String>,
     pub query: HashMap<String, String>,
 }
 
 // Main HTTP listener. Binds to port and spawns a new task calling process()
 // for each incoming request
-pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
+pub async fn listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
     // pub async fn http_listener<A: ToSocketAddrs>(addr: &A) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
 
     loop {
-        let (socket, addr) = listener.accept().await?;
-
+        let (stream, addr) = listener.accept().await?;
         if CONFIG.verbose {
-            eprintln!("HTTP: {:?} connected on FD {}", &addr, &socket.as_raw_fd());
+            eprintln!("TCP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
         }
-        spawn(async move {
-            match process(socket).await {
-                Ok(()) => {}
+        if CONFIG.tls.0.is_some() {
+            let tls_acceptor = tokio_native_tls::TlsAcceptor::from(
+                native_tls::TlsAcceptor::builder(CONFIG.tls.clone().0.unwrap())
+                    .min_protocol_version(Some(Protocol::Tlsv12))
+                    .build()?
+            ); //as tokio_native_tls::TlsAcceptor;
+            let stream = match tls_acceptor.accept(stream).await {
+                Ok(stream) => stream,
                 Err(e) => {
-                    eprintln!("Error encountered while handling request: {e}");
+                    eprintln!("HTTPS: {:?}: connection error: {:?}", &addr, &e);
+                    continue;
                 }
-            }
+            };
             if CONFIG.verbose {
-                eprintln!("HTTP: {:?} closed", &addr);
+                eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
             }
-            anyhow::Ok(())
-        });
+            spawn(async move {
+                match process(stream, addr).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Error encountered while handling request: {e}");
+                    }
+                }
+                if CONFIG.verbose {
+                    eprintln!("HTTP: {:?} closed", &addr);
+                }
+                anyhow::Ok(())
+            });
+
+        } else {
+            if CONFIG.verbose {
+                eprintln!("HTTP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
+            }
+            spawn(async move {
+                match process(stream, addr).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Error encountered while handling request: {e}");
+                    }
+                }
+                if CONFIG.verbose {
+                    eprintln!("HTTP: {:?} closed", &addr);
+                }
+                anyhow::Ok(())
+            });
+
+        }
+
     }
 
     #[allow(unreachable_code)]
@@ -61,8 +81,9 @@ pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
 // Entry point per HTTP client connection.
 // Read HTTP request and create HTTPRequest structure appropriately
 // Then call request_handler() to service the request
-pub async fn process(stream: TcpStream) -> Result<()> {
-    let mut reader = BufReader::new(stream);
+pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, client: SocketAddr) -> Result<()> {
+    //let mut reader = BufReader::new(stream);
+    let mut stream = tokio::io::BufStream::new(stream);
     let mut line_count: u64 = 0;
 
     let mut method = String::new();
@@ -74,7 +95,7 @@ pub async fn process(stream: TcpStream) -> Result<()> {
     // Read the header
     loop {
         let mut buf = Vec::<u8>::new();
-        let bytes_read = reader.read_until('\n' as u8, &mut buf).await?;
+        let bytes_read = stream.read_until('\n' as u8, &mut buf).await?;
 
         if bytes_read == 0 {
             return Err(Error::msg("HTTP client EOF"));
@@ -128,10 +149,11 @@ pub async fn process(stream: TcpStream) -> Result<()> {
     }
 
     let http_request = HttpRequest {
+        client,
         method,
         url,
         version,
-        stream: reader.into_inner(),
+        stream,
         headers,
         query,
     };
@@ -177,7 +199,7 @@ pub fn query_string(url: &str) -> (String, HashMap<String, String>) {
     (bare_url, query)
 }
 
-pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
+pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: HttpRequest<S>) -> Result<()> {
     let start_time = Instant::now();
 
     match CONFIG.files.get(&request.url) {
@@ -193,7 +215,7 @@ pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
             tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
             println!(
                 "{} {} ({}) type {}, {} byte(s) in {:?}",
-                request.stream.peer_addr()?,
+                &request.client,
                 &request.url,
                 path.to_string_lossy(),
                 content_type,
@@ -204,7 +226,7 @@ pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
         None => {
             println!(
                 "{} {} not found (404) in {:?}",
-                request.stream.peer_addr()?,
+                &request.client,
                 &request.url,
                 start_time.elapsed()
             );
@@ -215,11 +237,13 @@ pub async fn request_handler(mut request: HttpRequest) -> Result<()> {
     anyhow::Ok(())
 }
 
-pub async fn send_response(
-    request: &mut HttpRequest,
+pub async fn send_response<S>(
+    request: &mut HttpRequest<S>,
     content_type: &str,
     content: Option<&str>,
-) -> Result<()> {
+) -> Result<()> where
+    BufStream<S>: AsyncWrite + AsyncRead, S: AsyncWrite + AsyncRead + Unpin
+{
     match content {
         Some(content) => Ok(request
             .stream
@@ -240,11 +264,13 @@ pub async fn send_response(
     }
 }
 
-pub async fn send_response_header(
-    request: &mut HttpRequest,
+pub async fn send_response_header<S> (
+    request: &mut HttpRequest<S>,
     content_type: &str,
     content_length: u64,
-) -> Result<()> {
+) -> Result<()> where
+    BufStream<S>: AsyncWrite + AsyncRead, S: AsyncWrite + AsyncRead + Unpin
+{
     Ok(request
         .stream
         .write_all(

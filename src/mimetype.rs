@@ -1,6 +1,6 @@
 use crate::*;
 
-pub fn lookup_mimetype(request: &HttpRequest) -> &'static str {
+pub fn lookup_mimetype<S>(request: &HttpRequest<S>) -> &'static str {
     match request.url.to_lowercase().rsplit(".").next() {
         Some("doc") => "application/msword",
         Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
