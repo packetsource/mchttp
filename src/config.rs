@@ -109,6 +109,17 @@ impl Config {
                 "-?" => {
                     Self::usage();
                     break;
+                },
+                "-r" => {
+                    match std::fs::canonicalize(args.next().expect("expect root handler")) {
+                        Ok(p) => {
+                            config.files.insert(String::from("/"), p);
+                        },
+                        _ => {
+                            eprintln!("Specified root URL doesn't exist");
+                        }
+                    }
+                    continue;
                 }
 
                 // Derive the canonical form of the path being specified
