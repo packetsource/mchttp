@@ -8,6 +8,7 @@ pub fn lookup_mimetype(path: &PathBuf) -> &'static str {
         Some("png") => "image/png",
         Some("jpeg") => "image/jpeg",
         Some("jpg") => "image/jpeg",
+        Some("ico") => "image/x-icon",
         Some("htm") => "text/html",
         Some("html") => "text/html",
         Some("txt") => "text/plain",
