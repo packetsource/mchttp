@@ -1,7 +1,7 @@
 use crate::*;
 
-pub fn lookup_mimetype<S>(request: &HttpRequest<S>) -> &'static str {
-    match request.url.to_lowercase().rsplit(".").next() {
+pub fn lookup_mimetype(path: &PathBuf) -> &'static str {
+    match path.extension().unwrap_or_default().to_str() {
         Some("doc") => "application/msword",
         Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Some("gif") => "image/gif",

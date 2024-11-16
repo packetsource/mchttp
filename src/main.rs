@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use std::panic;
+use std::ffi::OsStr;
 
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;

@@ -208,7 +208,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
             let content_length = meta.len();
 
             // Crude mimetypes mappings
-            let content_type = lookup_mimetype(&request);
+            let content_type = lookup_mimetype(&path);
 
             let file = tokio::fs::OpenOptions::new().read(true).open(&path).await?;
             send_response_header(&mut request, content_type, content_length).await?;
