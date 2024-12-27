@@ -46,39 +46,52 @@ pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
 
 pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
 
-    let tls_acceptor = TlsAcceptor::from(Arc::new(CONFIG.tls.as_ref().unwrap().clone()));
-    let listener = TcpListener::bind(addr).await?;
+    'listener: loop {
+        let original_cert_mtime = std::fs::metadata(
+            CONFIG.tls_cert_filename.as_ref().unwrap()
+        )?.modified()?;
 
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        if CONFIG.verbose {
-            eprintln!("TCP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
-        }
+        let tls_acceptor = TlsAcceptor::from(Arc::new(CONFIG.tls.as_ref().unwrap().clone()));
+        let listener = TcpListener::bind(addr).await?;
 
-        let tls_acceptor = tls_acceptor.clone();
-        let stream = match tls_acceptor.accept(stream).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                eprintln!("HTTPS: {:?}: connection error: {:?}", &addr, &e);
-                continue;
+        'acceptor: loop {
+            let current_cert_mtime = std::fs::metadata(
+                CONFIG.tls_cert_filename.as_ref().unwrap()
+            )?.modified()?;
+            if current_cert_mtime > original_cert_mtime {
+                eprintln!("HTTPS: certificate file has changed: restarting TLS listener");
+                continue 'listener;
             }
-        };
-        if CONFIG.verbose {
-            eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
-        }
-        spawn(async move {
-            match process(stream, addr).await {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Error encountered while handling request: {e}");
-                }
-            }
+
+            let (stream, addr) = listener.accept().await?;
             if CONFIG.verbose {
-                eprintln!("HTTPS: {:?} closed", &addr);
+                eprintln!("TCP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
             }
-            anyhow::Ok(())
-        });
 
+            let tls_acceptor = tls_acceptor.clone();
+            let stream = match tls_acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    eprintln!("HTTPS: {:?}: connection error: {:?}", &addr, &e);
+                    continue;
+                }
+            };
+            if CONFIG.verbose {
+                eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
+            }
+            spawn(async move {
+                match process(stream, addr).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Error encountered while handling request: {e}");
+                    }
+                }
+                if CONFIG.verbose {
+                    eprintln!("HTTPS: {:?} closed", &addr);
+                }
+                anyhow::Ok(())
+            });
+        }
     }
 
     #[allow(unreachable_code)]

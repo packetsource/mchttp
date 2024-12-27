@@ -9,6 +9,8 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub files: HashMap<String, PathBuf>,
     pub tls: Option<rustls::ServerConfig>,
+    pub tls_cert_filename: Option<String>,
+    pub tls_key_filename: Option<String>,
 }
 
 lazy_static! {
@@ -29,6 +31,8 @@ impl Default for Config {
             bind_addr: DEFAULT_BIND_ADDR.parse().unwrap(),
             files: HashMap::new(),
             tls: None,
+            tls_key_filename: None,
+            tls_cert_filename: None,
         }
     }
 }
@@ -84,6 +88,11 @@ impl Config {
                             break;
                         }
                     };
+
+                    // Store the filenames for later mtime checking
+                    config.tls_key_filename = Some(identity.clone());
+                    config.tls_cert_filename = Some(cert.clone());
+
                     let certs = CertificateDer::pem_file_iter(&cert)
                         .expect("couldn't load PEM file certificates")
                         .collect::<Result<Vec<_>, _>>()
