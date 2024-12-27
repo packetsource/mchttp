@@ -1,4 +1,4 @@
-#![allow(unused_imports)]
+#![allow(unused)]
 
 use std::collections::HashMap;
 use std::env;
@@ -27,8 +27,16 @@ use tokio::time::{sleep, Duration};
 
 use regex::Regex;
 
-use native_tls::{Identity};
-use tokio_native_tls::{TlsAcceptor, TlsStream};
+use tokio_rustls;
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use rustls::ConfigBuilder;
+
+use tokio_rustls::rustls::internal::msgs::handshake::ServerExtension::Protocols;
+use tokio_rustls::rustls::ProtocolVersion::TLSv1_3;
+use tokio_rustls::rustls::SupportedProtocolVersion;
+
 
 mod config;
 use crate::config::*;
@@ -43,9 +51,6 @@ pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 pub const COMMIT_ID: &str = env!("GIT_COMMITID");
 
-#[derive(Clone)]
-pub struct TlsIdentity(Option<Identity>);
-
 //#[tokio::main(flavor="current_thread")]
 #[tokio::main]
 pub async fn main() -> Result<()> {
@@ -54,7 +59,11 @@ pub async fn main() -> Result<()> {
 
     let mut tasks = JoinSet::<Result<()>>::new();
 
-    tasks.spawn(async move { listener(&CONFIG.bind_addr).await });
+    if CONFIG.tls.is_some() {
+        tasks.spawn(async move { https_listener(&CONFIG.bind_addr).await });
+    } else {
+        tasks.spawn(async move { http_listener(&CONFIG.bind_addr).await });
+    }
 
     while let Some(join_result) = tasks.join_next().await {
         match join_result {

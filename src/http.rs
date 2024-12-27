@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use native_tls::{Protocol, TlsAcceptorBuilder};
 use tokio::io::AsyncRead;
+use tokio_rustls::TlsAcceptor;
 use crate::*;
 
 #[derive(Debug)]
@@ -15,8 +17,36 @@ pub struct HttpRequest<S> {
 
 // Main HTTP listener. Binds to port and spawns a new task calling process()
 // for each incoming request
-pub async fn listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
-    // pub async fn http_listener<A: ToSocketAddrs>(addr: &A) -> Result<()> {
+pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+
+        if CONFIG.verbose {
+            eprintln!("HTTP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
+        }
+        spawn(async move {
+            match process(stream, addr).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Error encountered while handling request: {e}");
+                }
+            }
+            if CONFIG.verbose {
+                eprintln!("HTTP: {:?} closed", &addr);
+            }
+            anyhow::Ok(())
+        });
+    }
+
+    #[allow(unreachable_code)]
+    Ok(())
+}
+
+pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
+
+    let tls_acceptor = TlsAcceptor::from(Arc::new(CONFIG.tls.as_ref().unwrap().clone()));
     let listener = TcpListener::bind(addr).await?;
 
     loop {
@@ -24,59 +54,37 @@ pub async fn listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
         if CONFIG.verbose {
             eprintln!("TCP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
         }
-        if CONFIG.tls.0.is_some() {
-            let tls_acceptor = tokio_native_tls::TlsAcceptor::from(
-                native_tls::TlsAcceptor::builder(CONFIG.tls.clone().0.unwrap())
-                    .min_protocol_version(Some(Protocol::Tlsv12))
-                    .build()?
-            ); //as tokio_native_tls::TlsAcceptor;
-            let stream = match tls_acceptor.accept(stream).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    eprintln!("HTTPS: {:?}: connection error: {:?}", &addr, &e);
-                    continue;
-                }
-            };
-            if CONFIG.verbose {
-                eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
-            }
-            spawn(async move {
-                match process(stream, addr).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        eprintln!("Error encountered while handling request: {e}");
-                    }
-                }
-                if CONFIG.verbose {
-                    eprintln!("HTTP: {:?} closed", &addr);
-                }
-                anyhow::Ok(())
-            });
 
-        } else {
-            if CONFIG.verbose {
-                eprintln!("HTTP: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
+        let tls_acceptor = tls_acceptor.clone();
+        let stream = match tls_acceptor.accept(stream).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                eprintln!("HTTPS: {:?}: connection error: {:?}", &addr, &e);
+                continue;
             }
-            spawn(async move {
-                match process(stream, addr).await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        eprintln!("Error encountered while handling request: {e}");
-                    }
-                }
-                if CONFIG.verbose {
-                    eprintln!("HTTP: {:?} closed", &addr);
-                }
-                anyhow::Ok(())
-            });
-
+        };
+        if CONFIG.verbose {
+            eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
         }
+        spawn(async move {
+            match process(stream, addr).await {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("Error encountered while handling request: {e}");
+                }
+            }
+            if CONFIG.verbose {
+                eprintln!("HTTPS: {:?} closed", &addr);
+            }
+            anyhow::Ok(())
+        });
 
     }
 
     #[allow(unreachable_code)]
     Ok(())
 }
+
 
 // Entry point per HTTP client connection.
 // Read HTTP request and create HTTPRequest structure appropriately
@@ -158,9 +166,6 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, 
         query,
     };
 
-    // dbg!(&http_request);
-
-    //    Ok(request_handler(http_request).await?)
     request_handler(http_request).await
 }
 
@@ -213,6 +218,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
             let file = tokio::fs::OpenOptions::new().read(true).open(&path).await?;
             send_response_header(&mut request, content_type, content_length).await?;
             tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
+
             println!(
                 "{} {} ({}) type {}, {} byte(s) in {:?}",
                 &request.client,
@@ -222,7 +228,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
                 content_length,
                 start_time.elapsed()
             );
-        }
+        },
         None => {
             println!(
                 "{} {} not found (404) in {:?}",
@@ -241,27 +247,31 @@ pub async fn send_response<S>(
     request: &mut HttpRequest<S>,
     content_type: &str,
     content: Option<&str>,
-) -> Result<()> where
+) -> anyhow::Result<()> where
     BufStream<S>: AsyncWrite + AsyncRead, S: AsyncWrite + AsyncRead + Unpin
 {
     match content {
-        Some(content) => Ok(request
-            .stream
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
-                    content_type,
-                    &content.len(),
-                    &content
-                )
-                .as_bytes(),
-            )
-            .await?),
-        _ => Ok(request
-            .stream
-            .write_all(format!("HTTP/1.1 404 Not found\r\n\r\n").as_bytes())
-            .await?),
-    }
+        Some(content) => {
+            request
+                .stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+                            content_type,
+                            &content.len(),
+                            &content
+                        ).as_bytes(),
+                    )
+                .await?;
+        },
+        _ => {
+            request
+                .stream
+                .write_all(String::from("HTTP/1.1 404 Not found\r\n\r\n").as_bytes())
+                .await?;
+        },
+    };
+   Ok(request.stream.flush().await?)
 }
 
 pub async fn send_response_header<S> (
