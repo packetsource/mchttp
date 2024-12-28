@@ -138,9 +138,7 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, 
 
             // First line is the main verb, URL request and version
             if line_count == 0 {
-                if CONFIG.verbose {
-                    eprintln!("HTTP: request: {}", &line);
-                }
+                println!("HTTP: request: {}", &line);
                 let verb_tokens: Vec<&str> = line.split(" ").collect();
                 if verb_tokens.len() != 3 {
                     return Err(Error::msg(
