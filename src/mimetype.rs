@@ -3,6 +3,8 @@ use crate::*;
 pub fn lookup_mimetype(path: &PathBuf) -> &'static str {
     match path.extension().unwrap_or_default().to_str() {
         Some("doc") => "application/msword",
+        Some("md") => "text/markdown",
+        Some("pdf") => "application/pdf",
         Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Some("gif") => "image/gif",
         Some("png") => "image/png",
