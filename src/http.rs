@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use native_tls::{Protocol, TlsAcceptorBuilder};
 use tokio::io::AsyncRead;
 use tokio_rustls::TlsAcceptor;
 use crate::*;
