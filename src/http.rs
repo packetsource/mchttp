@@ -46,20 +46,21 @@ pub async fn http_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
 
 pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
 
+    let listener = TcpListener::bind(addr).await?;
+
     'listener: loop {
         let original_cert_mtime = std::fs::metadata(
             CONFIG.tls_cert_filename.as_ref().unwrap()
         )?.modified()?;
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(CONFIG.tls.as_ref().unwrap().clone()));
-        let listener = TcpListener::bind(addr).await?;
 
         'acceptor: loop {
             let current_cert_mtime = std::fs::metadata(
                 CONFIG.tls_cert_filename.as_ref().unwrap()
             )?.modified()?;
             if current_cert_mtime > original_cert_mtime {
-                eprintln!("HTTPS: certificate file has changed: restarting TLS listener");
+                eprintln!("HTTPS: certificate file has changed: restarting TLS acceptor");
                 continue 'listener;
             }
 
@@ -79,6 +80,7 @@ pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
             if CONFIG.verbose {
                 eprintln!("HTTPS: {:?} connected on FD {}", &addr, &stream.as_raw_fd());
             }
+
             spawn(async move {
                 match process(stream, addr).await {
                     Ok(()) => {}
