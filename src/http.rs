@@ -60,7 +60,7 @@ pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
             )?.modified()?;
             if current_cert_mtime > original_cert_mtime {
                 eprintln!("HTTPS: certificate file has changed: restarting TLS acceptor");
-                continue 'listener;
+                break 'acceptor;
             }
 
             let (stream, addr) = listener.accept().await?;
