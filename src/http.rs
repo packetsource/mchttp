@@ -138,7 +138,9 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, 
 
             // First line is the main verb, URL request and version
             if line_count == 0 {
-                println!("Request: {}: {}", &client, &line);
+                if CONFIG.verbose {
+                    eprintln!("HTTP: request: {}", &line);
+                }
                 let verb_tokens: Vec<&str> = line.split(" ").collect();
                 if verb_tokens.len() != 3 {
                     return Err(Error::msg(
@@ -232,7 +234,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
             tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
 
             println!(
-                "Response: {} {} ({}) type {}, {} byte(s) in {:?}",
+                "{} {} ({}) type {}, {} byte(s) in {:?}",
                 &request.client,
                 &request.url,
                 path.to_string_lossy(),
