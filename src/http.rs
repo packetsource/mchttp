@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio_rustls::TlsAcceptor;
+use tokio::time::timeout;
 use crate::*;
 
 #[derive(Debug)]
@@ -81,10 +82,15 @@ pub async fn https_listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
             }
 
             spawn(async move {
-                match process(stream, addr).await {
-                    Ok(()) => {}
+                match timeout(Duration::from_secs(3), process(stream, addr)).await {
                     Err(e) => {
-                        eprintln!("Error encountered while handling request: {e}");
+                        eprintln!("HTTPS: {:?}: connection handler timed out", &addr);
+                    },
+                    Ok(result) => match result {
+                        Ok(()) => {},
+                        Err(e) => {
+                            eprintln!("Error encountered while handling request for client {}: {e}", &addr);
+                        }
                     }
                 }
                 if CONFIG.verbose {
@@ -120,7 +126,7 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, 
         let bytes_read = stream.read_until('\n' as u8, &mut buf).await?;
 
         if bytes_read == 0 {
-            return Err(Error::msg("HTTP client EOF"));
+            return Err(Error::msg(format!("HTTP: {}: client EOF", &client)));
         }
 
         // \r\n at least
@@ -138,12 +144,12 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(stream: S, 
 
             // First line is the main verb, URL request and version
             if line_count == 0 {
-                println!("HTTP: request: {}", &line);
+                println!("Process: {}: request: {}", &client, &line);
                 let verb_tokens: Vec<&str> = line.split(" ").collect();
                 if verb_tokens.len() != 3 {
                     return Err(Error::msg(
-                        "Malformed HTTP request (method/request/version)",
-                    ));
+                        format!("Process: {}: malformed HTTP request (method/request/version)", &client
+                    )));
                 }
                 method = verb_tokens[0].to_lowercase();
                 (url, query) = query_string(&verb_tokens[1]);
@@ -232,7 +238,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
             tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
 
             println!(
-                "{} {} ({}) type {}, {} byte(s) in {:?}",
+                "Request {} {} ({}) type {}, {} byte(s) in {:?}",
                 &request.client,
                 &request.url,
                 path.to_string_lossy(),
@@ -243,7 +249,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
         },
         None => {
             println!(
-                "{} {} not found (404) in {:?}",
+                "Request {} {} not found (404) in {:?}",
                 &request.client,
                 &request.url,
                 start_time.elapsed()
