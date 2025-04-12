@@ -236,6 +236,7 @@ pub async fn request_handler<S: AsyncRead + AsyncWrite + Unpin>(mut request: Htt
             let file = tokio::fs::OpenOptions::new().read(true).open(&path).await?;
             send_response_header(&mut request, content_type, content_length).await?;
             tokio::io::copy(&mut file.take(content_length), &mut request.stream).await?;
+            request.stream.flush().await?;
 
             println!(
                 "Request {} {} ({}) type {}, {} byte(s) in {:?}",
