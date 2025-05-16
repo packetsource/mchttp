@@ -326,8 +326,8 @@ pub async fn request_handler_dir<S: AsyncRead + AsyncWrite + Unpin>(mut request:
             if path.starts_with(root_path) {
 
                 let content_type = lookup_mimetype(&path);
-                eprintln!("Looking at path {}", &path.to_string_lossy());
-                eprintln!("Looking at path normalised as {}", std::fs::canonicalize(&path)?.to_string_lossy());
+                // eprintln!("Looking at path {}", &path.to_string_lossy());
+                // eprintln!("Looking at path normalised as {}", std::fs::canonicalize(&path)?.to_string_lossy());
 
                 match tokio::fs::metadata(&path).await {
                     Ok(meta) => {
@@ -349,7 +349,7 @@ pub async fn request_handler_dir<S: AsyncRead + AsyncWrite + Unpin>(mut request:
                     },
                     Err(e) => {
                         println!(
-                            "Request (Server {}) {} {} {} not found (metadata) (404) in {:?}",
+                            "Request (server {}) {} {} {} not found (metadata) (404) in {:?}",
                                 &request.server_name.as_ref().map_or("default", |x| x),
                                 &request.client,
                                 &request.method,
@@ -371,7 +371,7 @@ pub async fn request_handler_dir<S: AsyncRead + AsyncWrite + Unpin>(mut request:
         },
         _ => {
             println!(
-                "Request (Server {}) {} {} {} not found (canonical) (404) in {:?}",
+                "Request (server {}) {} {} {} not found (canonical) (404) in {:?}",
                     &request.server_name.as_ref().map_or("default", |x| x),
                     &request.client,
                     &request.method,
