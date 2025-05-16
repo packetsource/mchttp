@@ -8,9 +8,11 @@ pub struct Config {
     pub verbose: bool, // -v
     pub bind_addr: SocketAddr,
     pub files: HashMap<String, PathBuf>,
-    pub tls: Option<rustls::ServerConfig>,
-    pub tls_cert_filename: Option<String>,
-    pub tls_key_filename: Option<String>,
+    pub data_dir: Option<PathBuf>,
+    // pub tls: Option<rustls::ServerConfig>,
+    // pub tls_cert_filename: Option<String>,
+    // pub tls_key_filename: Option<String>,
+    pub tls: Option<String>,
 }
 
 lazy_static! {
@@ -30,23 +32,26 @@ impl Default for Config {
             verbose: false,
             bind_addr: DEFAULT_BIND_ADDR.parse().unwrap(),
             files: HashMap::new(),
+            data_dir: None,
             tls: None,
-            tls_key_filename: None,
-            tls_cert_filename: None,
+            // tls_key_filename: None,
+            // tls_cert_filename: None,
+            // tls_store: None,
         }
     }
 }
 impl Config {
     pub fn usage() {
-        eprintln!("Usage: mchttp [-v] [-l bind_addrs] files");
-        eprintln!(
-            "       -l            address to bind and listen on ({})",
-            &DEFAULT_BIND_ADDR
-        );
-        eprintln!("       -t            identity.key/identity.crt/filename for HTTPS");
+        eprintln!("Usage: mchttp [-v] [-l bind_addr] [-t file/dir] [-r file] files");
         eprintln!("       -v            verbose\n");
+        eprintln!("       -l            address to bind and listen on ({})", &DEFAULT_BIND_ADDR);
+        eprintln!("       -t file.key   use TLS with file.key and file.crt as default site");
+        eprintln!("       -t file.crt   use TLS with file.key and file.crt as default site");
+        eprintln!("       -t /etc/letsencrypt/live");
+        eprintln!("                     use TLS for all sites specified in LetsEncrypt/Certbot directory");
+        eprintln!("                     (ensure readable permissions for UID or GID server runs as)");
 
-        eprintln!("Generate key/cert like this:");
+        eprintln!("Generate self-signed key/cert like this:");
         eprintln!("/usr/bin/openssl req -x509 -newkey rsa:4096 -keyout mykey.key -out mycert.crt -days 30 -nodes -addext \"subjectAltName = DNS:localhost\"");
         // eprintln!(" /usr/bin/openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes");
         //eprintln!(" /usr/bin/openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem");
@@ -64,7 +69,7 @@ impl Config {
                 "-v" => {
                     config.verbose = true;
                     continue;
-                }
+                },
                 "-l" => {
                     config.bind_addr = SocketAddr::from_str(
                         args.next()
@@ -75,35 +80,9 @@ impl Config {
                     continue;
                 },
                 "-t" => {
-                    let (identity, cert) = {
-                        let root = args.next()
-                            .expect("expected filename.key / filename.crt containing TLS key or certificate");
-                        if root.contains(".key") {
-                            (root.clone(), root.replace(".key", ".crt"))
-                        } else if root.contains(".crt") {
-                            (root.replace(".crt", ".key"), root.clone())
-                        } else {
-                            eprintln!("-t requires filename.key or filename.crt");
-                            Self::usage();
-                            break;
-                        }
-                    };
-
-                    // Store the filenames for later mtime checking
-                    config.tls_key_filename = Some(identity.clone());
-                    config.tls_cert_filename = Some(cert.clone());
-
-                    let certs = CertificateDer::pem_file_iter(&cert)
-                        .expect("couldn't load PEM file certificates")
-                        .collect::<Result<Vec<_>, _>>()
-                        .expect("couldn't read PEM file certificates");
-                    let key = PrivateKeyDer::from_pem_file(&identity)
-                        .expect("couldn't load private key");
-                    config.tls =
-                        Some(rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-                        .with_no_client_auth()
-                        .with_single_cert(certs, key).expect("Couldn't use TLS certificate")
-                    );
+                    let file = args.next().expect("expected path to TLS certificate/identity store");
+                    std::fs::exists(&file).expect("path to TLS certificate/identity store should exist and be readble");
+                    config.tls = Some(file);
                     continue;
                 },
                 "-h" => {
@@ -113,6 +92,12 @@ impl Config {
                 "-?" => {
                     Self::usage();
                     break;
+                },
+                "-d" => {
+                    config.data_dir = Some(std::fs::canonicalize(
+                        args.next().expect("Expected path of data directory")
+                    ).expect("Specified data directory path does not exist"));
+                    continue;
                 },
                 "-r" => {
                     match std::fs::canonicalize(args.next().expect("expect root handler")) {

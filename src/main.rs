@@ -1,51 +1,62 @@
 #![allow(unused)]
 
-use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
+use std::fs::Metadata;
 use std::borrow::Cow;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::panic;
 use std::ffi::OsStr;
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::Path;
+use std::io::BufReader;
 
 use anyhow::{Error, Result};
 use lazy_static::lazy_static;
 use tokio;
-use tokio::fs;
 use tokio::net::ToSocketAddrs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::io::{AsyncBufReadExt, BufStream};
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::task::{spawn, JoinSet, JoinHandle};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, timeout};
 
 use regex::Regex;
 
-use tokio_rustls;
-use tokio_rustls::rustls;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::pki_types::pem::PemObject;
 use rustls::ConfigBuilder;
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::ServerConfig;
+use rustls::crypto::aws_lc_rs::sign;
 
 use tokio_rustls::rustls::internal::msgs::handshake::ServerExtension::Protocols;
 use tokio_rustls::rustls::ProtocolVersion::TLSv1_3;
 use tokio_rustls::rustls::SupportedProtocolVersion;
-
+use tokio_rustls;
+use tokio_rustls::rustls;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::TlsAcceptor;
 
 mod config;
-use crate::config::*;
+use config::*;
+
+mod identity;
+use identity::*;
 
 mod http;
-use crate::http::*;
+use http::*;
 
 mod mimetype;
-use crate::mimetype::*;
+use mimetype::*;
+
 
 pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
@@ -59,12 +70,22 @@ pub async fn main() -> Result<()> {
 
     let mut tasks = JoinSet::<Result<()>>::new();
 
+    // Start the tasks
     if CONFIG.tls.is_some() {
-        tasks.spawn(async move { https_listener(&CONFIG.bind_addr).await });
+        let tls_config = CONFIG.tls.as_ref().unwrap();
+
+        // The connection server
+        tasks.spawn(async move {
+            https_listener(&CONFIG.bind_addr).await
+        });
+
     } else {
         tasks.spawn(async move { http_listener(&CONFIG.bind_addr).await });
     }
 
+    // General task completion handler
+    // Print a message indicating success or failure. If it's panic,
+    // propagate the error
     while let Some(join_result) = tasks.join_next().await {
         match join_result {
             Ok(result) => {
