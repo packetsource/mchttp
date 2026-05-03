@@ -70,18 +70,7 @@ pub async fn main() -> Result<()> {
 
     let mut tasks = JoinSet::<Result<()>>::new();
 
-    // Start the tasks
-    if CONFIG.tls.is_some() {
-        let tls_config = CONFIG.tls.as_ref().unwrap();
-
-        // The connection server
-        tasks.spawn(async move {
-            https_listener(&CONFIG.bind_addr).await
-        });
-
-    } else {
-        tasks.spawn(async move { http_listener(&CONFIG.bind_addr).await });
-    }
+    tasks.spawn(async move { listener(&CONFIG.bind_addr).await });
 
     // General task completion handler
     // Print a message indicating success or failure. If it's panic,
