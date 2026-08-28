@@ -23,6 +23,8 @@ pub fn lookup_mimetype(path: &PathBuf) -> &'static str {
         Some("xls") => "application/vnd.ms-excel",
         Some("xlsx") => "application/vnd.ms-excel",
         Some("rtf") => "application/rtf",
+        Some("pac") => "application/x-ns-proxy-autoconfig",
         _ => "application/octet-stream",
     }
 }
+
