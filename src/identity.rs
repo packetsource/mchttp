@@ -1,7 +1,19 @@
 use rustls::server;
 use crate::*;
 
-pub fn load_identities(identity_resolver: &mut server::ResolvesServerCertUsingSni, path: &str) -> Result<()> {
+#[derive(Debug)]
+pub struct CertResolver {
+    pub sni: server::ResolvesServerCertUsingSni,
+    pub default: Option<Arc<rustls::sign::CertifiedKey>>,
+}
+
+impl rustls::server::ResolvesServerCert for CertResolver {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        self.sni.resolve(hello).or_else(|| self.default.clone())
+    }
+}
+
+pub fn load_identities(identity_resolver: &mut CertResolver, path: &str) -> Result<()> {
 
     let mut files: Vec<(String, PathBuf, PathBuf)> = Vec::new();
     let metadata = std::fs::metadata(path)?;
@@ -50,6 +62,7 @@ pub fn load_identities(identity_resolver: &mut server::ResolvesServerCertUsingSn
         files.push((dns_name, cert_path, key_path));
     }
 
+    let mut count: u64 = 0;
     for (dns_name, cert_path, key_path) in &files {
         let certs= CertificateDer::pem_file_iter(&cert_path)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -58,7 +71,12 @@ pub fn load_identities(identity_resolver: &mut server::ResolvesServerCertUsingSn
             certs.clone(),
             sign::any_supported_type(&key).unwrap(),
         );
-        identity_resolver.add(dns_name, certified_key)?;
+        // We put the first entry in as the default
+        if count == 0 {
+            identity_resolver.default = Some(Arc::new(certified_key.clone()));
+        }
+        let _ = identity_resolver.sni.add(dns_name, certified_key)?;
+        count += 1;
     }
 
     Ok(())

@@ -1,6 +1,7 @@
 use rustls::server;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio::sync::Semaphore;
 use crate::*;
 
 const MAX_HEADER_LINES: usize = 100;
@@ -70,16 +71,16 @@ pub struct HttpRequest<S> {
 // identity loading fails.
 fn build_tls_acceptor() -> Option<TlsAcceptor> {
     let tls = CONFIG.tls.as_ref()?;
-    let mut identity_resolver = server::ResolvesServerCertUsingSni::new();
-    if let Err(e) = load_identities(&mut identity_resolver, tls) {
-        eprintln!("Failed to load TLS identities: {e}");
-        return None;
-    }
-    let config = ServerConfig::builder_with_protocol_versions(
-        &[&rustls::version::TLS13, &rustls::version::TLS12],
-    )
-    .with_no_client_auth()
-    .with_cert_resolver(Arc::new(identity_resolver));
+
+    let mut identity_resolver = CertResolver {
+        sni: server::ResolvesServerCertUsingSni::new(),
+        default: None,
+    };
+    load_identities(&mut identity_resolver, tls).map_err(|e| Option::<TlsAcceptor>::None);
+    let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(identity_resolver));
+
     Some(TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -88,22 +89,36 @@ fn build_tls_acceptor() -> Option<TlsAcceptor> {
 pub async fn listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
     let tcp = TcpListener::bind(addr).await?;
     let shared = Arc::new(Mutex::new(build_tls_acceptor()));
+    let semaphore = Arc::new(Semaphore::new(10usize));
 
     if CONFIG.tls.is_some() {
         let shared = Arc::clone(&shared);
         spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
-                *shared.lock().unwrap() = build_tls_acceptor();
+                match build_tls_acceptor() {
+                    Some(acceptor) => {
+                        *shared.lock().await = Some(acceptor);
+                    }
+                    None => continue
+                }
             }
         });
     }
 
     loop {
-        let (stream, addr) = tcp.accept().await?;
-        let acceptor = shared.lock().unwrap().clone();
+        let (stream, addr) = match tcp.accept().await {
+            Ok((stream, addr)) => (stream, addr),
+            Err(e) => {
+                eprintln!("Failed to accept connection: {e}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let acceptor = shared.lock().await.clone();
         let is_tls = acceptor.is_some();
         let raw_fd = stream.as_raw_fd();
+
 
         if CONFIG.verbose {
             eprintln!(
@@ -114,71 +129,88 @@ pub async fn listener<A: ToSocketAddrs + ?Sized>(addr: &A) -> Result<()> {
             );
         }
 
-        spawn(async move {
-            let result: Result<()> = match acceptor {
-                None => {
-                    let mut s = AnyStream::Plain(stream);
-                    process(&mut s, addr, None).await
-                }
-                Some(acceptor) => match acceptor.accept(stream).await {
-                    Err(e) => {
-                        eprintln!(
-                            "HTTPS: {:?} FD {}: TLS handshake error: {:?}",
-                            &addr, raw_fd, e
-                        );
-                        return;
-                    }
-                    Ok(tls_stream) => {
-                        let server_name = {
-                            let (_, conn) = tls_stream.get_ref();
-                            conn.server_name().map(str::to_string)
-                        };
-                        if CONFIG.verbose {
-                            let (_, conn) = tls_stream.get_ref();
-                            eprintln!(
-                                "HTTPS: {:?} FD {} identity {:?} cipher {:?}",
-                                &addr,
-                                raw_fd,
-                                conn.server_name(),
-                                conn.negotiated_cipher_suite()
-                            );
-                        }
-                        let mut s = AnyStream::Tls(Box::new(tls_stream));
-                        let r = match timeout(
+        let permit = semaphore.acquire().await?;
+
+        spawn({
+            let permit  = permit;   // move the permit into the task
+
+            async move {
+                let result: Result<()> = match acceptor {
+                    None => {
+                        let mut s = AnyStream::Plain(stream);
+                        match timeout(
                             Duration::from_secs(5),
-                            process(&mut s, addr, server_name),
+                            process(&mut s, addr, None),
                         )
-                        .await
+                            .await
                         {
                             Err(_) => {
                                 eprintln!("HTTPS: {:?}: timed out", &addr);
                                 Ok(())
                             }
                             Ok(r) => r,
-                        };
-                        if let AnyStream::Tls(ref mut tls) = s {
-                            // send_close_notify borrow ends at ;
-                            tls.get_mut().1.send_close_notify();
-                            let _ = tls.flush().await;
                         }
-                        r
                     }
-                },
-            };
+                    Some(acceptor) => match acceptor.accept(stream).await {
+                        Err(e) => {
+                            eprintln!(
+                                "HTTPS: {:?} FD {}: TLS handshake error: {:?}",
+                                &addr, raw_fd, e
+                            );
+                            return;
+                        }
+                        Ok(tls_stream) => {
+                            let server_name = {
+                                let (_, conn) = tls_stream.get_ref();
+                                conn.server_name().map(str::to_string)
+                            };
+                            if CONFIG.verbose {
+                                let (_, conn) = tls_stream.get_ref();
+                                eprintln!(
+                                    "HTTPS: {:?} FD {} identity {:?} cipher {:?}",
+                                    &addr,
+                                    raw_fd,
+                                    conn.server_name(),
+                                    conn.negotiated_cipher_suite()
+                                );
+                            }
+                            let mut s = AnyStream::Tls(Box::new(tls_stream));
+                            let r = match timeout(
+                                Duration::from_secs(5),
+                                process(&mut s, addr, server_name),
+                            )
+                                .await
+                            {
+                                Err(_) => {
+                                    eprintln!("HTTPS: {:?}: timed out", &addr);
+                                    Ok(())
+                                }
+                                Ok(r) => r,
+                            };
+                            if let AnyStream::Tls(ref mut tls) = s {
+                                // send_close_notify borrow ends at ;
+                                tls.get_mut().1.send_close_notify();
+                                let _ = tls.flush().await;
+                            }
+                            r
+                        }
+                    },
+                };
 
-            if let Err(e) = result {
-                eprintln!(
-                    "{}: {:?}: error: {e}",
-                    if is_tls { "HTTPS" } else { "HTTP" },
-                    &addr
-                );
-            }
-            if CONFIG.verbose {
-                eprintln!(
-                    "{}: {:?} closed",
-                    if is_tls { "HTTPS" } else { "HTTP" },
-                    &addr
-                );
+                if let Err(e) = result {
+                    eprintln!(
+                        "{}: {:?}: error: {e}",
+                        if is_tls { "HTTPS" } else { "HTTP" },
+                        &addr
+                    );
+                }
+                if CONFIG.verbose {
+                    eprintln!(
+                        "{}: {:?} closed",
+                        if is_tls { "HTTPS" } else { "HTTP" },
+                        &addr
+                    );
+                }
             }
         });
     }
@@ -204,24 +236,25 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(
 
     loop {
         let mut buf = Vec::<u8>::new();
-        let bytes_read = stream.read_until(b'\n', &mut buf).await?;
+        let bytes_read = (&mut stream).take(MAX_LINE_BYTES as u64).read_until(b'\n', &mut buf).await?;
 
         if bytes_read == 0 {
             return Err(Error::msg(format!("HTTP: {}: client EOF", &client)));
         }
 
         // Reject oversized lines before allocating a String from them.
-        if bytes_read > MAX_LINE_BYTES {
-            stream
-                .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await?;
-            stream.flush().await?;
-            return Err(Error::msg(format!(
-                "HTTP: {}: header line too large ({} bytes)",
-                &client, bytes_read
-            )));
-        }
+        // if bytes_read > MAX_LINE_BYTES {
+        //     stream
+        //         .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        //         .await?;
+        //     stream.flush().await?;
+        //     return Err(Error::msg(format!(
+        //         "HTTP: {}: header line too large ({} bytes)",
+        //         &client, bytes_read
+        //     )));
+        // }
 
+        // Break between header and body
         if bytes_read > 2 {
             let mut line = String::from_utf8(buf)?;
 

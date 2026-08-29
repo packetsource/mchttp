@@ -1,6 +1,7 @@
 use crate::*;
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+const DEFAULT_CONCURRENT_SESSIONS: usize = 2_000;
 
 //#[derive(Debug)]
 #[derive(Debug)]
@@ -9,10 +10,8 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     pub files: HashMap<String, PathBuf>,
     pub data_dir: Option<PathBuf>,
-    // pub tls: Option<rustls::ServerConfig>,
-    // pub tls_cert_filename: Option<String>,
-    // pub tls_key_filename: Option<String>,
     pub tls: Option<String>,
+    pub concurrent_sessions: usize,
 }
 
 lazy_static! {
@@ -34,9 +33,7 @@ impl Default for Config {
             files: HashMap::new(),
             data_dir: None,
             tls: None,
-            // tls_key_filename: None,
-            // tls_cert_filename: None,
-            // tls_store: None,
+            concurrent_sessions: DEFAULT_CONCURRENT_SESSIONS,
         }
     }
 }
@@ -50,11 +47,20 @@ impl Config {
         eprintln!("       -t /etc/letsencrypt/live");
         eprintln!("                     use TLS for all sites specified in LetsEncrypt/Certbot directory");
         eprintln!("                     (ensure readable permissions for UID or GID server runs as)");
+        eprintln!("       -N sessions   Maximum number of concurrent sessions (default {})", DEFAULT_CONCURRENT_SESSIONS);
+        eprintln!("       -d dir        Directory to serve files from (default current directory)");
+        eprintln!("       -r file       Serve file at root URL (default /)");
+        eprintln!("       files         Files to serve (default /tmp/test.txt)");
+        eprintln!("");
+        eprintln!("       If TLS is enabled, the following files are required:");
+        eprintln!("       - my.domain.name.key");
+        eprintln!("       - my.domain.name.crt");
+        eprintln!("       Alternatively a directory can be specified containing multiple key/cert pairs,");
+        eprintln!("       with the directory name being the DNS name of the site (e.g. my.domain.name)");
+        eprintln!("       (e.g. my.domain.name/fullchain.pem and my.domain.name/privkey.pem)");
 
         eprintln!("Generate self-signed key/cert like this:");
         eprintln!("/usr/bin/openssl req -x509 -newkey rsa:4096 -keyout mykey.key -out mycert.crt -days 30 -nodes -addext \"subjectAltName = DNS:localhost\"");
-        // eprintln!(" /usr/bin/openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes");
-        //eprintln!(" /usr/bin/openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem");
 
         process::exit(1);
     }
@@ -81,8 +87,11 @@ impl Config {
                 },
                 "-t" => {
                     let file = args.next().expect("expected path to TLS certificate/identity store");
-                    std::fs::exists(&file).expect("path to TLS certificate/identity store should exist and be readble");
-                    config.tls = Some(file);
+                    if std::fs::exists(&file).unwrap_or(false) {
+                        config.tls = Some(file);
+                    } else {
+                        panic!("Path to TLS certificate/identity store should exist and be readable");
+                    }
                     continue;
                 },
                 "-h" => {
@@ -93,6 +102,13 @@ impl Config {
                     Self::usage();
                     break;
                 },
+                "-N" => {
+                    config.concurrent_sessions = args.next()
+                        .expect("expected number of concurrent sessions")
+                        .parse::<usize>()
+                        .expect("Number of concurrent sessions should be an integer");
+                    continue;
+                }
                 "-d" => {
                     config.data_dir = Some(std::fs::canonicalize(
                         args.next().expect("Expected path of data directory")
