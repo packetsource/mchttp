@@ -39,7 +39,7 @@ impl Default for Config {
 }
 impl Config {
     pub fn usage() {
-        eprintln!("Usage: mchttp [-v] [-l bind_addr] [-t file/dir] [-r file] files");
+        eprintln!("Usage: mchttp [-v] [-l bind_addr] [-t file/dir] [-r index.html] files");
         eprintln!("       -v            verbose\n");
         eprintln!("       -l            address to bind and listen on ({})", &DEFAULT_BIND_ADDR);
         eprintln!("       -t file.key   use TLS with file.key and file.crt as default site");
@@ -49,8 +49,8 @@ impl Config {
         eprintln!("                     (ensure readable permissions for UID or GID server runs as)");
         eprintln!("       -N sessions   Maximum number of concurrent sessions (default {})", DEFAULT_CONCURRENT_SESSIONS);
         eprintln!("       -d dir        Directory to serve files from (default current directory)");
-        eprintln!("       -r file       Serve file at root URL (default /)");
-        eprintln!("       files         Files to serve (default /tmp/test.txt)");
+        eprintln!("       -r file       Specify file to service for root URL eg index.html");
+        eprintln!("       files         Alternatively, white-listed files to serve");
         eprintln!("");
         eprintln!("       If TLS is enabled, the following files are required:");
         eprintln!("       - my.domain.name.key");

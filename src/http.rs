@@ -239,20 +239,12 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(
         let bytes_read = (&mut stream).take(MAX_LINE_BYTES as u64).read_until(b'\n', &mut buf).await?;
 
         if bytes_read == 0 {
-            return Err(Error::msg(format!("HTTP: {}: client EOF", &client)));
+            return Err(Error::msg("client EOF"));
         }
 
-        // Reject oversized lines before allocating a String from them.
-        // if bytes_read > MAX_LINE_BYTES {
-        //     stream
-        //         .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-        //         .await?;
-        //     stream.flush().await?;
-        //     return Err(Error::msg(format!(
-        //         "HTTP: {}: header line too large ({} bytes)",
-        //         &client, bytes_read
-        //     )));
-        // }
+        if line_count==0 && buf[0] == 0x16 {
+            return Err(Error::msg("found TLS ClientHello, expected HTTP request"));
+        }
 
         // Break between header and body
         if bytes_read > 2 {
@@ -316,7 +308,11 @@ pub async fn process<S: AsyncRead + AsyncWrite + std::marker::Unpin>(
         query,
     };
 
-    request_handler_dir(http_request).await
+    if CONFIG.data_dir.is_some() {
+        request_handler_dir(http_request).await
+    } else {
+        request_handler_static_file(http_request).await
+    }
 }
 
 // Split URL on '?' first (before decoding) to prevent %3F from being misread
